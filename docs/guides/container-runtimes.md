@@ -36,13 +36,26 @@ ASTRA_CONTAINER_ENGINE=podman MEMORIA_EMBEDDING_PROVIDER=mock make stack-start-h
 
 `stack-start-head` builds the canonical Dockerfile from checked-out HEAD,
 including local source changes, then starts and verifies the ordinary stack.
-It tags the image `localhost/astra:head-<full-commit-sha>` and saves that reference
-in the selected `STACK_ENV` file after the build succeeds. Later `stack-up` and
+It tags the image `localhost/astra:head-<full-commit-sha>-<build-id>` and saves that reference
+in the selected `STACK_ENV` file after the build succeeds. Each build gets a
+new identity so Compose recreates the API even when HEAD is unchanged. Later `stack-up` and
 `stack-setup` commands retain it. Rerun `stack-start-head` after changing source
 or updating HEAD. Build metadata records the revision and whether the source
 tree has tracked changes. Use `make stack-build-head` to build and save the
 selection without starting services. Docker uses the same targets with
 `ASTRA_CONTAINER_ENGINE=docker`.
+
+The native rebuild regression can use a small local base image instead of
+building the complete Astra runtime:
+
+```bash
+ASTRA_TEST_NATIVE_PODMAN=1 ASTRA_TEST_PODMAN_BASE_IMAGE=docker.io/library/ubuntu:24.04 \
+  python3 scripts/dev/test_container_runtime.py RuntimeContract.test_same_head_rebuild_updates_the_running_native_image
+```
+
+It requires an already-present base image, builds two different images at the
+same HEAD, checks each running container's image and file contents through
+native Podman Compose, and removes its temporary project and images.
 
 For API-only development with an existing dependency stack, build with
 `make dev-api-docker-build IMAGE_NAME=localhost/astra IMAGE_TAG=head`, then run

@@ -54,7 +54,7 @@ targets. New stack descriptors record this selection. See
 | `make build-cli` | Build the `astra` CLI in release mode (same as `build-cli-release`) |
 | `make build-cli-release` | Build the `astra` CLI in release mode |
 | `make dev-api-docker-build IMAGE_NAME=localhost/astra IMAGE_TAG=head` | Build this checkout's API/CLI image using the selected container engine |
-| `make stack-build-head` | Build the canonical Dockerfile from this checkout and save `localhost/astra:head-<commit-sha>` in `STACK_ENV` after success |
+| `make stack-build-head` | Build the canonical Dockerfile from this checkout and save `localhost/astra:head-<commit-sha>-<build-id>` in `STACK_ENV` after success |
 
 ## Published Compose Stack
 

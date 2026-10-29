@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +26,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import signal
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["TEST_CALLS"], "a") as log:
@@ -35,15 +37,18 @@ with open(os.environ["TEST_CALLS"], "a") as log:
 is_compose = name == "podman-compose" or args[:1] == ["compose"]
 if name in ("mysql", "mysqldump") and args == ["--help"]:
     print("--ssl-mode")
-elif args == ["--version"]:
+elif args[:1] == ["--version"]:
     print("podman version " + os.getenv("TEST_PODMAN_VERSION", "6.1.4") if name == "podman" or os.getenv("TEST_DOCKER_WRAPPER") else "Docker version 29.0.0")
 elif is_compose and "version" in args:
     print(os.getenv("TEST_COMPOSE_VERSION", "1.6.0") if name == "podman-compose" else "Docker Compose version v2.39.4")
 elif is_compose and "--help" in args:
     print("--dry-run")
 elif args[:1] == ["info"]:
+    if os.getenv("TEST_ENGINE_DOWN"):
+        sys.exit(1)
     print("true" if "--format" in args else "{}")
 elif not is_compose and args[:1] == ["ps"]:
+    time.sleep(float(os.getenv("TEST_PS_DELAY", "0")))
     if os.getenv("TEST_MISSING"):
         sys.exit(0)
     service = "api"
@@ -53,6 +58,9 @@ elif not is_compose and args[:1] == ["ps"]:
     replicas = int(os.getenv("TEST_REPLICAS", "1"))
     print("\n".join(service + str(i) for i in range(replicas)))
 elif not is_compose and args[:1] == ["inspect"]:
+    if os.getenv("TEST_INSPECT_IGNORE_TERM"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(float(os.getenv("TEST_INSPECT_DELAY", "0")))
     if os.getenv("TEST_BAD_INSPECT"):
         print("not JSON: do-not-print-this-secret")
         sys.exit(0)
@@ -223,6 +231,16 @@ class RuntimeContract(unittest.TestCase):
         self.assertEqual(result.returncode, 124, result.stderr)
         self.assertIn("startup timed out", result.stderr)
 
+    def test_readiness_deadline_bounds_ps_and_healthy_inspect(self):
+        self.compose = ROOT / "deployment/all-in-one/docker-compose.prod.yml"
+        for engine in ("docker", "podman"):
+            for delay in ("TEST_PS_DELAY", "TEST_INSPECT_DELAY"):
+                started = time.monotonic()
+                result = self.run_runtime("compose", "up", "--wait", "--wait-timeout", "1", "api",
+                    engine=engine, **{delay: "3", "TEST_INSPECT_IGNORE_TERM": "1"})
+                self.assertEqual(result.returncode, 124, result.stderr)
+                self.assertLess(time.monotonic() - started, 2.8)
+
     def test_cancel_reaps_native_provider_command(self):
         env = {**self.env, "ASTRA_CONTAINER_ENGINE": "podman", "TEST_DEPENDENCY_HANG": "1"}
         process = subprocess.Popen([str(RUNTIME), "--env-file", str(self.env_file), "--file", str(self.compose),
@@ -355,7 +373,6 @@ class RuntimeContract(unittest.TestCase):
 
     def test_head_build_selects_checkout_image_and_preserves_selection_on_failure(self):
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-        image = f"localhost/astra:head-{revision}"
         for engine in ("docker", "podman"):
             self.calls_file.unlink(missing_ok=True)
             self.env_file.write_text(f"ASTRA_CONTAINER_ENGINE={engine}\nASTRA_IMAGE=example.test/astra:previous\n")
@@ -363,13 +380,22 @@ class RuntimeContract(unittest.TestCase):
             result = subprocess.run(command, cwd=ROOT, env=self.env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             build = next(c for c in self.calls() if c["args"][:1] == ["build"])
+            image = build["args"][build["args"].index("-t") + 1]
             self.assertEqual(build["tool"], engine)
-            self.assertIn(image, build["args"])
+            self.assertRegex(image, rf"^localhost/astra:head-{revision}-[0-9a-f]{{12}}$")
             self.assertIn(f"IMAGE_REVISION={revision}", build["args"])
             self.assertEqual(self.env_file.read_text().count("ASTRA_IMAGE="), 1)
             self.assertIn(f"ASTRA_IMAGE={image}\n", self.env_file.read_text())
             self.assertEqual(self.env_file.stat().st_mode & 0o777, 0o600)
             self.assertFalse(any("up" in c["args"] for c in self.calls()))
+
+            self.calls_file.unlink(missing_ok=True)
+            result = subprocess.run(command, cwd=ROOT, env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rebuilt = next(c for c in self.calls() if c["args"][:1] == ["build"])
+            replacement = rebuilt["args"][rebuilt["args"].index("-t") + 1]
+            self.assertNotEqual(image, replacement, "same-HEAD rebuilds must change the selected image")
+            self.assertIn(f"ASTRA_IMAGE={replacement}\n", self.env_file.read_text())
 
             selected = self.env_file.read_bytes()
             start = ["make", "--no-print-directory", "stack-start-head", f"STACK_ENV={self.env_file}"]
@@ -410,6 +436,80 @@ class RuntimeContract(unittest.TestCase):
         self.assertIn("--protocol=TCP", dump["args"])
         self.assertTrue(dump["has_mysql_password"])
         self.assertNotIn("do-not-print-this-secret", json.dumps(self.calls()) + result.stdout + result.stderr)
+
+    def test_ops_host_endpoint_does_not_require_an_accessible_engine(self):
+        for name in ("mysql", "mysqldump", "curl"):
+            tool = self.bin / name
+            tool.write_text(STUB)
+            tool.chmod(0o755)
+        with self.env_file.open("a") as file:
+            file.write("MATRIXONE_HOST=127.0.0.1\nMATRIXONE_PORT=26009\n")
+        backup = self.work / "restore.sql"
+        backup.write_text("CREATE TABLE smoke (id INT);\n")
+        for engine in ("docker", "podman"):
+            env = {**self.env, "ASTRA_CONTAINER_ENGINE": engine, "ASTRA_OPS_ENV_FILE": str(self.env_file),
+                "MATRIXONE_PASSWORD": "do-not-print-this-secret", "BACKUP_DIR": str(self.work / "backups" / engine),
+                "TEST_ENGINE_DOWN": "1"}
+            for script,args in (("backup.sh",[]),("restore.sh",[str(backup)]),("health_check.sh",[])):
+                self.calls_file.unlink(missing_ok=True)
+                result = subprocess.run([str(ROOT / "scripts/ops" / script),*args],env=env,cwd=self.work,
+                    input="yes\n",capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+                clients=[c for c in self.calls() if c["tool"] in ("mysql","mysqldump") and "--help" not in c["args"]]
+                self.assertTrue(clients)
+                self.assertTrue(all("-P26009" in c["args"] and "--protocol=TCP" in c["args"] for c in clients))
+                self.assertFalse(any(c["args"][:1]==["exec"] for c in self.calls()))
+                self.assertNotIn("do-not-print-this-secret",json.dumps(self.calls())+result.stdout+result.stderr)
+        invalid={**env,"ASTRA_CONTAINER_ENGINE":"docker","TEST_DOCKER_WRAPPER":"1"}
+        result=subprocess.run([str(ROOT / "scripts/ops/backup.sh")],env=invalid,cwd=self.work,capture_output=True,text=True)
+        self.assertEqual(result.returncode,2)
+        self.assertIn("docker resolves to Podman",result.stderr)
+
+    @unittest.skipUnless(shutil.which("podman-compose"),"requires the native Compose provider for interpolation coverage")
+    def test_native_compose_rejects_missing_and_empty_required_image_pin(self):
+        real=shutil.which("podman-compose")
+        (self.bin / "podman-compose").unlink()
+        (self.bin / "podman-compose").symlink_to(real)
+        for value in ("","MATRIXONE_IMAGE=\n"):
+            self.env_file.write_text("ASTRA_STACK_NAME=project\nASTRA_IMAGE=example.test/astra:test\n"+value)
+            result=self.run_runtime("compose","config","--quiet",engine="podman")
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("MATRIXONE_IMAGE",result.stderr)
+
+    @unittest.skipUnless(os.getenv("ASTRA_TEST_NATIVE_PODMAN") == "1", "opt-in native image/Compose regression")
+    def test_same_head_rebuild_updates_the_running_native_image(self):
+        base=os.environ["ASTRA_TEST_PODMAN_BASE_IMAGE"]
+        project="astra-review-head-"+uuid.uuid4().hex[:10]
+        env={**self.env,"PATH":os.environ["PATH"],"ASTRA_CONTAINER_ENGINE":"podman",
+            "ASTRA_STACK_NAME":project,"MEMORIA_EMBEDDING_PROVIDER":"mock"}
+        spec=self.work / "native.yml"
+        spec.write_text('services:\n  api:\n    image: "${ASTRA_IMAGE:?select test image}"\n    entrypoint: ["/bin/sh", "-c", "exec sleep 3600"]\n')
+        dockerfile=self.work / "Dockerfile"
+        native=[str(RUNTIME),"--env-file",str(self.env_file),"--file",str(spec),"--project-name",project]
+        selector=["--filter",f"label=io.podman.compose.project={project}","--filter","label=io.podman.compose.service=api"]
+        revision=subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip()
+        images=[]
+        try:
+            for marker in ("first","second"):
+                dockerfile.write_text(f"ARG BASE_IMAGE\nFROM ${{BASE_IMAGE}}\nUSER 0\nRUN printf '%s' '{marker}' > /astra-review-marker\n")
+                args=f"--pull=never --file {dockerfile} --build-arg BASE_IMAGE={base} --label io.astra.review-test={project}"
+                built=subprocess.run(["make","--no-print-directory","stack-build-head",f"STACK_ENV={self.env_file}",f"DOCKER_BUILD_ARGS={args}"],
+                    cwd=ROOT,env=env,text=True,capture_output=True,timeout=90)
+                self.assertEqual(built.returncode,0,built.stderr+built.stdout)
+                started=subprocess.run([*native,"compose","up","-d","--wait","--wait-timeout","30","api"],env=env,capture_output=True,text=True,timeout=40)
+                self.assertEqual(started.returncode,0,started.stderr+started.stdout)
+                cid=subprocess.check_output(["podman","ps","-q",*selector],env=env,text=True).strip()
+                self.assertTrue(cid and "\n" not in cid)
+                images.append(subprocess.check_output(["podman","inspect","--format","{{.Image}}",cid],env=env,text=True).strip())
+                self.assertEqual(subprocess.check_output(["podman","exec",cid,"cat","/astra-review-marker"],env=env,text=True),marker)
+                self.assertEqual(subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),revision)
+            self.assertNotEqual(images[0],images[1],"running container retained the earlier same-HEAD image")
+        finally:
+            ids=subprocess.check_output(["podman","ps","-aq",*selector],env=env,text=True).split()
+            if ids:subprocess.run(["podman","rm","--force","--volumes",*ids],env=env,check=True,capture_output=True)
+            subprocess.run([*native,"compose","down","--volumes"],env=env,capture_output=True,timeout=20)
+            owned=subprocess.check_output(["podman","images","-q","--filter",f"label=io.astra.review-test={project}"],env=env,text=True).split()
+            if owned:subprocess.run(["podman","rmi",*dict.fromkeys(owned)],env=env,check=True,capture_output=True)
 
     def test_production_deploy_through_each_native_backend(self):
         config = self.work / "production.env"

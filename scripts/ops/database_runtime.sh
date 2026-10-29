@@ -26,10 +26,23 @@ if [[ -z "$DB_PASSWORD" ]]; then
 fi
 
 ops_find_matrixone() {
-    local project
+    local project engine_error engine_status
     matrixone_container_ids=""
     if [[ "$DB_HOST" == localhost || "$DB_HOST" == 127.0.0.1 ]] && command -v "$container_engine" >/dev/null 2>&1; then
-        container_check_engine || return
+        if engine_error="$(container_check_engine 2>&1)"; then
+            :
+        else
+            engine_status=$?
+            if [[ "$engine_status" != 1 ]]; then
+                printf '%s\n' "$engine_error" >&2
+                return "$engine_status"
+            fi
+            # Discovery is optional when using the configured host endpoint.
+            # An unavailable daemon must behave like an absent executable.
+            # Invalid backend selections are still rejected before discovery.
+            matrixone_container_count=0
+            return 0
+        fi
         project="$(env_file_read "$ops_env_file" ASTRA_STACK_NAME 2>/dev/null || true)"
         local filters=(--filter "label=$container_label.service=matrixone")
         [[ -z "$project" ]] || filters+=(--filter "label=$container_label.project=$project")

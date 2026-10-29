@@ -10,10 +10,10 @@ import sys
 from collections import deque
 
 
-def stop_command(process):
+def stop_command(process, grace=5):
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=5)
+        process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
@@ -92,7 +92,7 @@ def main():
             return process.wait(timeout=int(sys.argv[2]))
         except subprocess.TimeoutExpired:
             print("Container startup timed out; inspect the retained services and logs.", file=sys.stderr)
-            stop_command(process)
+            stop_command(process, grace=0.25)
             return 124
         except KeyboardInterrupt:
             stop_command(process)

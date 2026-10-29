@@ -753,17 +753,18 @@ stack-start: stack-env
 stack-build-head:
 	@set -eu; \
 	revision="$$(git rev-parse HEAD)"; \
+	build_tag="head-$$revision-$$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"; \
 	engine="$$("$(CONTAINER_RUNTIME)" --env-file "$(abspath $(STACK_ENV))" engine)"; \
 	$(MAKE) dev-api-docker-build ASTRA_CONTAINER_ENGINE="$$engine" \
-		IMAGE_NAME=localhost/astra IMAGE_TAG="head-$$revision" \
+		IMAGE_NAME=localhost/astra IMAGE_TAG="$$build_tag" \
 		IMAGE_VERSION="head-$$revision" IMAGE_REVISION="$$revision"; \
 	$(MAKE) stack-env ASTRA_CONTAINER_ENGINE="$$engine" \
-		ASTRA_IMAGE="localhost/astra:head-$$revision"; \
+		ASTRA_IMAGE="localhost/astra:$$build_tag"; \
 	echo "✅ Selected checkout image in $(STACK_ENV)"
 
 .PHONY: stack-start-head
 stack-start-head: stack-build-head
-	@$(MAKE) stack-start ASTRA_IMAGE="localhost/astra:head-$$(git rev-parse HEAD)"
+	@$(MAKE) stack-start
 
 .PHONY: stack-up
 stack-up: stack-config

@@ -20,7 +20,13 @@ container_select() {
     esac
 }
 
-container_run() { "${container_command[@]}" "$@"; }
+container_run() {
+    if [[ -n "${container_command_timeout:-}" ]]; then
+        python3 "$container_lib_dir/container_state.py" run-timeout "$container_command_timeout" "${container_command[@]}" "$@"
+    else
+        "${container_command[@]}" "$@"
+    fi
+}
 
 container_check_engine() {
     command -v "$container_engine" >/dev/null 2>&1 || {
@@ -31,7 +37,7 @@ container_check_engine() {
     container_version="$version"
     if [[ "$container_engine" == docker && "$version" == *[Pp]odman* ]]; then
         echo "docker resolves to Podman. Select ASTRA_CONTAINER_ENGINE=podman for native support." >&2
-        return 1
+        return 2
     fi
     container_run info >/dev/null 2>&1 || {
         echo "$container_engine is not accessible. Run this check from the host terminal." >&2; return 1;
@@ -131,13 +137,6 @@ PY
         # the selected tags/digests while making Docker Hub references explicit.
         for key in ASTRA_IMAGE MATRIXONE_IMAGE MEMORIA_IMAGE NGINX_IMAGE; do
             image="$(env_resolve_value "$container_env_file" "$key" 2>/dev/null || true)"
-            if [[ -z "$image" && "$key" == MATRIXONE_IMAGE ]]; then image=matrixorigin/matrixone:latest; fi
-            if [[ -z "$image" && "$key" == MEMORIA_IMAGE ]]; then
-                image="$(env_file_read "$container_lib_dir/../../deployment/all-in-one/.env.example" MEMORIA_IMAGE)"
-            fi
-            if [[ -z "$image" && "$key" == NGINX_IMAGE ]]; then
-                image="$(env_file_read "$container_lib_dir/../../.env.production.example" NGINX_IMAGE)"
-            fi
             if [[ -n "$image" ]]; then
                 if [[ "$image" != */* ]]; then
                     export "$key=docker.io/library/$image"
@@ -209,8 +208,16 @@ container_ps() {
 }
 
 container_metadata() {
-    local action="$1" id="$2"
-    container_run inspect "$id" | python3 "$container_lib_dir/container_state.py" "$action"
+    local action="$1" id="$2" inspection
+    inspection="$(container_run inspect "$id")" || return
+    printf '%s' "$inspection" | python3 "$container_lib_dir/container_state.py" "$action"
+}
+
+container_probe_before() {
+    local remaining=$(( $1 - SECONDS ))
+    shift
+    ((remaining > 0)) || { echo "Container readiness timeout expired." >&2; return 124; }
+    container_command_timeout="$remaining" "$@"
 }
 
 container_wait() {
@@ -226,11 +233,11 @@ container_wait() {
                 [[ "${specification%%=*}" != "$service" ]] || expected="${specification#*=}"
             done
             [[ "$expected" != 0 ]] || continue
-            ids="$(container_ids "$service")" || return
+            ids="$(container_probe_before "$deadline" container_ids "$service")" || return
             count=0
             for id in $ids; do
                 count=$((count + 1))
-                status="$(container_metadata state "$id")" || return
+                status="$(container_probe_before "$deadline" container_metadata state "$id")" || return
                 case "$status" in
                     healthy|running|completed) ;;
                     exited|dead|unhealthy|removing)
@@ -240,11 +247,11 @@ container_wait() {
             done
             [[ "$count" -ge "$expected" ]] || pending=true
         done
-        [[ "$pending" == true ]] || return 0
         if (( SECONDS >= deadline )); then
             echo "Services did not become ready within ${timeout}s: $*" >&2
-            return 1
+            return 124
         fi
+        [[ "$pending" == true ]] || return 0
         sleep 1
     done
 }
@@ -352,10 +359,10 @@ container_compose() (
         fi
         if [[ "$wait" == true ]]; then
             remaining=$((deadline - SECONDS))
-            ((remaining > 0)) || { echo "Container initialization exhausted its readiness timeout." >&2; exit 1; }
+            ((remaining > 0)) || { echo "Container initialization exhausted its readiness timeout." >&2; exit 124; }
             container_command_timeout="$remaining" container_native_compose up -d ${args[@]+"${args[@]}"} ${services[@]+"${services[@]}"} || exit
             remaining=$((deadline - SECONDS))
-            ((remaining > 0)) || { echo "Container startup exhausted its readiness timeout." >&2; exit 1; }
+            ((remaining > 0)) || { echo "Container startup exhausted its readiness timeout." >&2; exit 124; }
             container_wait "$remaining" ${services[@]+"${services[@]}"}
         else
             container_native_compose up ${args[@]+"${args[@]}"} ${services[@]+"${services[@]}"}

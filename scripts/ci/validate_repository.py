@@ -642,7 +642,8 @@ def main() -> None:
         errors.append(
             ".env.example: development Memoria must use the pinned all-in-one compatibility image"
         )
-    if f"${{MEMORIA_IMAGE:-{supported_memoria_image}}}" not in deps_compose:
+    if not any(f"${{MEMORIA_IMAGE:-{image}}}" in deps_compose
+               for image in (supported_memoria_image, f"docker.io/{supported_memoria_image}")):
         errors.append(
             "deployment/all-in-one/docker-compose.deps.yml: Memoria fallback must match "
             "the pinned owner-auth capable image"

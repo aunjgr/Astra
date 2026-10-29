@@ -22,7 +22,7 @@ Use these files as the canonical configuration references:
 - `ASTRA_IMAGE` — API/CLI image reference. An explicit value supplied to
   `make stack-env` or `make stack-start` is saved in the selected stack env file.
   `make stack-start-head` builds the current checkout and saves
-  `localhost/astra:head-<full-commit-sha>` after a successful build.
+  `localhost/astra:head-<full-commit-sha>-<build-id>` after a successful build.
 
 See [container runtimes](../guides/container-runtimes.md) for requirements,
 rootless settings, and engine data boundaries.
