@@ -10,6 +10,9 @@ services:
   matrixone-init:
     image: ${MATRIXONE_IMAGE:-matrixorigin/matrixone:latest}
     user: root
+    userns_mode: ${ASTRA_DEPENDENCY_USERNS:-}
+    labels:
+      io.astra.lifecycle: init
     entrypoint:
       [
         "sh",
@@ -26,6 +29,7 @@ services:
     image: ${MATRIXONE_IMAGE:-matrixorigin/matrixone:latest}
     hostname: matrixone
     user: "${UID:-1000}:${GID:-1000}"
+    userns_mode: ${ASTRA_DEPENDENCY_USERNS:-}
     depends_on:
       matrixone-init:
         condition: service_completed_successfully
@@ -43,7 +47,7 @@ services:
     networks:
       - mo-net
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:6060/debug/vars"]
+      test: ["CMD", "curl", "--noproxy", "*", "-sf", "http://127.0.0.1:6060/debug/vars"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -64,6 +68,7 @@ services:
     image: ${MEMORIA_IMAGE:-matrixorigin/memoria@sha256:702389efe1d67e3074f024b5c721dc83fc215e9b66cb7b0362dc4e8077c9d061}
     hostname: memoria
     user: "${UID:-1000}:${GID:-1000}"
+    userns_mode: ${ASTRA_DEPENDENCY_USERNS:-}
     ports:
       - "${ASTRA_BIND_ADDRESS:-127.0.0.1}:${MEMORIA_PORT:-8100}:8100"
     volumes:
