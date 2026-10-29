@@ -6075,6 +6075,7 @@ async fn context_meta_surfaces_unknown_active_skills_for_debugging() {
 
 #[allow(dead_code)]
 mod subscription_provider {
+    use astra_services as services;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../services/tests/common/chatgpt_fixture.rs"
