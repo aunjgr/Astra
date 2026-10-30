@@ -58,6 +58,15 @@ elif not is_compose and args[:1] == ["ps"]:
     replicas = int(os.getenv("TEST_REPLICAS", "1"))
     print("\n".join(service + str(i) for i in range(replicas)))
 elif not is_compose and args[:1] == ["inspect"]:
+    if os.getenv("TEST_INSPECT_CHILD_IGNORE_TERM"):
+        import subprocess
+        subprocess.Popen([sys.executable, "-c", """
+import json, os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["TEST_CALLS"], "a") as log:
+    log.write(json.dumps({"tool": "inspect-child", "pid": os.getpid()}) + "\\n")
+time.sleep(30)
+"""])
     if os.getenv("TEST_INSPECT_IGNORE_TERM"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     time.sleep(float(os.getenv("TEST_INSPECT_DELAY", "0")))
@@ -132,13 +141,13 @@ class RuntimeContract(unittest.TestCase):
     def calls(self):
         return [json.loads(line) for line in self.calls_file.read_text().splitlines()] if self.calls_file.exists() else []
 
-    def run_runtime(self, *args, engine=None, **changes):
+    def run_runtime(self, *args, engine=None, timeout=None, **changes):
         env = {**self.env, **changes}
         if engine is not None:
             env["ASTRA_CONTAINER_ENGINE"] = engine
         return subprocess.run(
             [str(RUNTIME), "--env-file", str(self.env_file), "--file", str(self.compose), *args],
-            env=env, text=True, capture_output=True,
+            env=env, text=True, capture_output=True, timeout=timeout,
         )
 
     def test_default_and_file_and_explicit_selection(self):
@@ -172,12 +181,17 @@ class RuntimeContract(unittest.TestCase):
                     self.assertIn("/podman/project/", config["logs"])
 
     def test_relative_descriptor_is_projected_as_absolute_env_file(self):
+        logical = self.work / "logical"
+        logical.symlink_to(self.work, target_is_directory=True)
+        self.env_file = logical / self.env_file.name
         env = {**self.env, "ASTRA_CONTAINER_ENGINE": "podman"}
         result = subprocess.run([str(RUNTIME), "--env-file", self.env_file.name, "--file", str(self.compose),
             "compose", "config", "--quiet"], cwd=self.work, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         config = next(c for c in self.calls() if "config" in c["args"])
-        self.assertEqual(config["stack_env_file"], str(self.env_file))
+        projected = Path(config["stack_env_file"])
+        self.assertTrue(projected.is_absolute())
+        self.assertEqual(projected.resolve(), self.env_file.resolve())
 
     def test_env_file_contents_participate_in_configuration(self):
         self.run_runtime("compose", "config", "--quiet", engine="podman")
@@ -240,6 +254,27 @@ class RuntimeContract(unittest.TestCase):
                     engine=engine, **{delay: "3", "TEST_INSPECT_IGNORE_TERM": "1"})
                 self.assertEqual(result.returncode, 124, result.stderr)
                 self.assertLess(time.monotonic() - started, 2.8)
+
+    def test_readiness_timeout_kills_descendant_after_parent_exits(self):
+        self.compose = ROOT / "deployment/all-in-one/docker-compose.prod.yml"
+        for engine in ("docker", "podman"):
+            with self.subTest(engine=engine):
+                self.calls_file.unlink(missing_ok=True)
+                try:
+                    started = time.monotonic()
+                    result = self.run_runtime("compose", "up", "--wait", "--wait-timeout", "1", "api",
+                        engine=engine, timeout=5, TEST_INSPECT_DELAY="30", TEST_INSPECT_CHILD_IGNORE_TERM="1")
+                    self.assertEqual(result.returncode, 124, result.stderr)
+                    self.assertLess(time.monotonic() - started, 2.8)
+                    self.assertTrue(any(call["tool"] == "inspect-child" for call in self.calls()))
+                finally:
+                    # Clean up the isolated inspect group if the regression fails.
+                    for call in self.calls():
+                        if call["tool"] == engine and call["args"][:1] == ["inspect"]:
+                            try:
+                                os.killpg(call["pid"], signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
     def test_cancel_reaps_native_provider_command(self):
         env = {**self.env, "ASTRA_CONTAINER_ENGINE": "podman", "TEST_DEPENDENCY_HANG": "1"}

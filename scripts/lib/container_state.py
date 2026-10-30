@@ -14,11 +14,15 @@ def stop_command(process, grace=5):
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-    except ProcessLookupError:
+    except (subprocess.TimeoutExpired, ProcessLookupError):
         pass
+    finally:
+        # The parent can exit while descendants still hold our output pipes.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
 
 
 def interrupt_command(signum, _frame):
